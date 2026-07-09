@@ -126,3 +126,10 @@ app.get('/list', async (req, res) => {
 });
 
 app.listen(PORT, () => console.log(`Key server running on port ${PORT}`));
+app.post('/revoke', async (req, res) => {
+    const { key, secret } = req.body;
+    if (secret !== process.env.ADMIN_SECRET) return res.status(403).json({ error: 'Unauthorized' });
+    const success = await updateKeyStatus(key, 'REVOKED');
+    if (success) res.json({ success: true });
+    else res.status(404).json({ error: 'Key not found' });
+});
