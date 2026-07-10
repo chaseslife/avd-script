@@ -1,17 +1,20 @@
 // server.js – Combined Key API Server + Discord Bot
+// Run with: node server.js
+// Environment variables needed:
+//   SPREADSHEET_ID, SHEET_NAME (optional), GOOGLE_SERVICE_ACCOUNT_JSON,
+//   ADMIN_SECRET, DISCORD_TOKEN, PORT (optional)
+
 const express = require('express');
 const { google } = require('googleapis');
 const { Client, GatewayIntentBits } = require('discord.js');
-const axios = require('axios'); // used by bot
+const axios = require('axios');
 const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
 
 const app = express();
 app.use(express.json());
 
 // ============================================================
-// 1. GOOGLE SHEETS API SETUP (same as before)
+// 1. GOOGLE SHEETS SETUP
 // ============================================================
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = process.env.SHEET_NAME || 'Keys';
@@ -19,18 +22,23 @@ const ADMIN_SECRET = process.env.ADMIN_SECRET || 'defaultSecret';
 
 let auth;
 if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-    auth = new google.auth.GoogleAuth({
-        credentials: creds,
-        scopes: ['https://www.googleapis.com/auth/spreadsheets'],
-    });
+    try {
+        const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+        auth = new google.auth.GoogleAuth({
+            credentials: creds,
+            scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+        });
+    } catch (e) {
+        console.error('Failed to parse GOOGLE_SERVICE_ACCOUNT_JSON:', e.message);
+        process.exit(1);
+    }
 } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     auth = new google.auth.GoogleAuth({
         keyFile: process.env.GOOGLE_APPLICATION_CREDENTIALS,
         scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 } else {
-    console.error('No Google credentials provided');
+    console.error('No Google credentials provided. Set GOOGLE_SERVICE_ACCOUNT_JSON or GOOGLE_APPLICATION_CREDENTIALS.');
     process.exit(1);
 }
 const sheets = google.sheets({ version: 'v4', auth });
@@ -98,7 +106,7 @@ app.post('/validate', async (req, res) => {
         }
         res.json({ valid: false, reason: 'not found' });
     } catch (err) {
-        console.error(err);
+        console.error('Validate error:', err);
         res.status(500).json({ valid: false, error: 'Server error' });
     }
 });
@@ -130,12 +138,12 @@ app.post('/revoke', async (req, res) => {
 // 3. START THE EXPRESS SERVER
 // ============================================================
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Key server running on port ${PORT}`);
 });
 
 // ============================================================
-// 4. START THE DISCORD BOT (merged into same process)
+// 4. DISCORD BOT (merged into same process)
 // ============================================================
 const botClient = new Client({
     intents: [
@@ -157,68 +165,83 @@ botClient.on('messageCreate', async (message) => {
     const args = message.content.slice(1).trim().split(/ +/);
     const command = args.shift().toLowerCase();
 
+    // Restrict to administrators or channel named 'bot-commands'
     const allowed = message.member.permissions.has('Administrator') ||
                     (message.channel.name === 'bot-commands');
-    if (!allowed) return message.reply('❌ Permission denied.');
+    if (!allowed) {
+        return message.reply('❌ You do not have permission to use this bot.');
+    }
 
     const SERVER_URL = process.env.SERVER_URL || `https://avd-script.onrender.com`;
 
     if (command === 'generatekey') {
         try {
             const response = await axios.post(`${SERVER_URL}/generate`, { secret: ADMIN_SECRET });
-            await message.reply(`✅ Generated key: \`${response.data.key}\``);
+            await message.reply(`✅ New key generated: \`${response.data.key}\``);
         } catch (err) {
-            await message.reply('❌ Failed to generate key.');
+            console.error(err.message);
+            await message.reply('❌ Failed to generate key. Server may be down.');
         }
     }
     else if (command === 'listkeys') {
         try {
             const response = await axios.get(`${SERVER_URL}/list`, { params: { secret: ADMIN_SECRET } });
             const keys = response.data.keys;
-            if (!keys || keys.length === 0) return message.reply('📭 No keys.');
+            if (!keys || keys.length === 0) return message.reply('📭 No keys found.');
             let list = keys.map((row, idx) =>
-                `${idx+1}. ${row[0]} | Used: ${(row[2] || 'FALSE').toUpperCase()}`
+                `${idx+1}. ${row[0]} | Used: ${(row[2] || 'FALSE').toUpperCase()} | ${row[1] || 'unused'}`
             ).join('\n');
             if (list.length > 2000) list = list.slice(0, 1997) + '...';
             await message.reply(`📋 Keys:\n${list}`);
         } catch (err) {
+            console.error(err.message);
             await message.reply('❌ Failed to list keys.');
         }
     }
     else if (command === 'checkkey') {
         const key = args[0];
-        if (!key) return message.reply('⚠️ Usage: !checkkey <key>');
+        if (!key) return message.reply('⚠️ Usage: `!checkkey <key>`');
         try {
             const response = await axios.post(`${SERVER_URL}/validate`, { key });
             if (response.data.valid) {
-                await message.reply(`✅ Key \`${key}\` is valid.`);
+                await message.reply(`✅ Key \`${key}\` is valid and unused.`);
             } else {
-                await message.reply(`❌ Key \`${key}\` invalid/used.`);
+                await message.reply(`❌ Key \`${key}\` is invalid or already used.`);
             }
         } catch (err) {
+            console.error(err.message);
             await message.reply('❌ Error checking key.');
         }
     }
     else if (command === 'revokekey') {
         const key = args[0];
-        if (!key) return message.reply('⚠️ Usage: !revokekey <key>');
+        if (!key) return message.reply('⚠️ Usage: `!revokekey <key>`');
         try {
             await axios.post(`${SERVER_URL}/revoke`, { key, secret: ADMIN_SECRET });
             await message.reply(`🔒 Key \`${key}\` revoked.`);
         } catch (err) {
+            console.error(err.message);
             await message.reply('❌ Failed to revoke key.');
         }
     }
     else if (command === 'help') {
         await message.reply(`
-**Commands:**
-!generatekey
-!listkeys
-!checkkey <key>
-!revokekey <key>
-!help
+**Available commands:**
+\`!generatekey\` – Create a new license key
+\`!listkeys\` – Show all keys and their status
+\`!checkkey <key>\` – Verify if a key is valid
+\`!revokekey <key>\` – Mark a key as revoked/used
+\`!help\` – Show this message
         `);
     }
 });
 
-botClient.login(process.env.DISCORD_TOKEN);
+// Login the bot – this line must be present
+botClient.login(process.env.DISCORD_TOKEN).catch(err => {
+    console.error('Discord bot login failed:', err.message);
+});
+
+// Catch unhandled rejections to avoid crash
+process.on('unhandledRejection', (err) => {
+    console.error('Unhandled rejection:', err);
+});
